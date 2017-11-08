@@ -44,7 +44,7 @@ namespace AQtion
         private readonly int width;
         private readonly int height;
 
-        public Field(string path, int height)
+        public Field(string path)
         {
             lines = new List<string>();
             width = 0;
@@ -62,14 +62,6 @@ namespace AQtion
                 }
             }
 
-            if (lines.Count > height)
-            {
-                throw new Exception("field height is too large");
-            }
-            while (lines.Count < height)
-            {
-                lines.Insert(0, "");
-            }
 
             // 長さを揃える
             lines = lines.Select(line => line + new string(Tile.SPACE, width - line.Length) + Tile.GOAL).ToList();
@@ -82,6 +74,20 @@ namespace AQtion
         public char Get(int x, int y)
         {
             return lines.ElementAt(y).ElementAt(x);
+        }
+
+        // 範囲外を指定されたときにはデフォルト値を返す
+        public char GetWithoutException(int x, int y, char invalid=Tile.WALL)
+        {
+            if (y < 0 ||  lines.Count <= y )
+            {
+                return invalid;
+            }
+            if (x < 0 || lines.ElementAt(y).Length <= x) {
+                return invalid;
+            }
+            return Get(x, y);
+
         }
 
         // この辺りよくわからずに使ってるけど不要でしょって思うよ
@@ -98,9 +104,11 @@ namespace AQtion
         private bool end;
         private int score;
         private int turn;
+        private bool isGoal;
 
         public bool End { get => end; }
         public int Score { get => score; }
+        public bool IsGoal { get => isGoal; set => isGoal = value; }
 
         public Simulator(Field field, int screenWidth)
         {
@@ -110,6 +118,7 @@ namespace AQtion
             end = false;
             score = 0;
             turn = 0;
+            isGoal = false;
         }
 
         public void Update(Action nextAction)
@@ -157,15 +166,21 @@ namespace AQtion
             // ゴール
             if (field.Get(pos.X, pos.Y) == Tile.GOAL)
             {
-                score = 100;
+                score = 100 + pos.X;
                 end = true;
+                isGoal = true;
             }
             // 死んだ
             else if (field.Get(pos.X, pos.Y) == Tile.DEATH)
             {
-                score = -100;
+                score = -100 ; // 進むほど死んだときのペナルティがましになるってわけよ
                 end = true;
             }
+            else
+            {
+                score = pos.X;
+            }
+            
         }
 
         // 現在の画面を返す
@@ -229,18 +244,31 @@ namespace AQtion
             screen.ForEach(line => Console.WriteLine(line.ToArray()));
         }
 
-        // 現在の画面を一つの文字列として返す
-        // 実質ハッシュ関数
+        // 現状を文字列として返すハッシュのようなもの
         public string GetState()
         {
-            List<List<char>> screen = GetScreen();
-            return string.Join("", screen.Select(line => new string(line.ToArray())));
+            //// 見える画面全部返してたとき
+            //List<List<char>> screen = GetScreen();
+            //return string.Join("", screen.Select(line => new string(line.ToArray())));
+
+            // 自分の正面HxWを返す
+            const int H = 3, W = 3;
+            List<char> state = new List<char>();
+            for (int y = pos.Y-H/2; y <= pos.Y+H/2; y++)
+            {
+                for (int x = pos.X; x <= pos.X + W; x++)
+                {
+                        state.Add(field.GetWithoutException(x, y));
+                }
+            }
+
+            return string.Join("", state);
         }
 
         // 報酬を返す
         public double GetReward()
         {
-            return (double)score;
+            return score;
         }
     }
 
@@ -272,7 +300,7 @@ namespace AQtion
         public void Update(string state, int action, string nextState, double reward)
         {
             GetValues(state)[action] =
-                (1 - learningRate) * values[state][action] +
+                (1 - learningRate) * GetValues(state)[action] +
                 learningRate * (reward + discountRate * GetValues(nextState).Max());
         }
         // 次の行動を選択
@@ -288,20 +316,14 @@ namespace AQtion
                 return random.Next(actionCount);
             }
 
-            var vs = GetValues(state);
-
-            int maxIndex = 0;
-            double v = vs.ElementAt(0);
+            // 評価最大となる選択肢を、偏りがないように *できるだけきれいに* かいたらこうなる
+            List<double> vs = GetValues(state);
+            List<KeyValuePair<double, int>> qValueWithIndex = new List<KeyValuePair<double, int>>();
             for (int i = 0; i < vs.Count; i++)
             {
-                if (vs.ElementAt(i) > v)
-                {
-                    v = vs.ElementAt(i);
-                    maxIndex = i;
-                }
+                qValueWithIndex.Add(new KeyValuePair<double, int>(vs[i], i));
             }
-
-            return maxIndex;
+            return qValueWithIndex.Where(x => x.Key == vs.Max()).OrderBy(x => new Guid()).Take(1).ToArray()[0].Value;
         }
 
         public void Show()
@@ -321,12 +343,13 @@ namespace AQtion
 
     class Program
     {
-        static void Episode(QValue qValue, Field field, int screenWidth, Random random)
+        static bool Episode(QValue qValue, Field field, int screenWidth, Random random)
         {
             Simulator simulator = new Simulator(field, 20);
             while (!simulator.End)
             {
                 //simulator.Draw();
+                //qValue.Show();
                 //System.Threading.Thread.Sleep(10);
 
                 string state = simulator.GetState();
@@ -336,20 +359,26 @@ namespace AQtion
                 double reward = simulator.GetReward();
                 string nextState = simulator.GetState();
                 qValue.Update(state, act, nextState, reward);
+
             }
+            return simulator.IsGoal;
         }
         static void Main(string[] args)
         {
-            Field field = new Field("field1.txt", 10);
-            QValue qValue = new QValue(3, 0.3, 0.7);
-            Random random = new Random();
+            QValue qValue = new QValue(3, 0.1, 0.3);
+            Random random = new Random(100);
 
-            for (int i = 0; i < 1000; i++)
+            for (int i = 1; i<= 9; i++)
             {
-                Episode(qValue, field, 20, random);
+                if (i == 4) { continue; }
+                Field field = new Field($"field{i}.txt");
+                int goals = 0;
+                for (int c = 0; c < 10000; c++)
+                {
+                    if (Episode(qValue, field, 20, random)) { goals++; }
+                }
+                Console.WriteLine(goals);
             }
-            qValue.Show();
-            Console.ReadKey();
 
             //Simulator simulator = new Simulator(field, 20);
             //while (!simulator.End)
