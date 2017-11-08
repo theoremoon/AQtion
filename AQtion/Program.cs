@@ -173,7 +173,7 @@ namespace AQtion
             // 死んだ
             else if (field.Get(pos.X, pos.Y) == Tile.DEATH)
             {
-                score = -100 ; // 進むほど死んだときのペナルティがましになるってわけよ
+                score = -100 ;
                 end = true;
             }
             else
@@ -252,7 +252,7 @@ namespace AQtion
             //return string.Join("", screen.Select(line => new string(line.ToArray())));
 
             // 自分の正面HxWを返す
-            const int H = 3, W = 3;
+            const int H = 3, W = 5;
             List<char> state = new List<char>();
             for (int y = pos.Y-H/2; y <= pos.Y+H/2; y++)
             {
@@ -269,6 +269,99 @@ namespace AQtion
         public double GetReward()
         {
             return score;
+        }
+    }
+
+    class ImprovedQ
+    {
+        private Dictionary<string, List<double>> qValues; // Q値のリスト
+        private readonly int actionNum; // 選びうる選択肢の数
+        private readonly double discountRate; // 割引率
+        private readonly double learningRate; // 学習率 
+
+        // コンストラクタ。各種の値を初期化する
+        public ImprovedQ(int actionNum, double learningRate, double discountRate)
+        {
+            this.actionNum = actionNum;
+            this.learningRate = learningRate;
+            this.discountRate = discountRate;
+
+            this.InitQValues();
+        }
+
+        // qValuesを初期化する関数
+        private void InitQValues(double initialValue = 0)
+        {
+            this.qValues = new Dictionary<string, List<double>>();
+        }
+
+        private List<double> GetQValues(string key)
+        {
+            if (! this.qValues.ContainsKey(key))
+            {
+                List<double> list = new List<double>(new double[this.actionNum]);
+                this.qValues.Add(key, list);
+            }
+            return qValues[key];
+        }
+
+        // 行動から学習する
+        public void Update(List<KeyValuePair<string, int>> stateActionList, double reward)
+        {
+            if (stateActionList.Count <= 1) { return; }
+
+            double rate = 1;
+            for (int i = stateActionList.Count - 1; i >= 1; i--)
+            {
+                string beforeState = stateActionList[i - 1].Key;
+                int action = stateActionList[i].Value;
+                string afterState = stateActionList[i].Key;
+
+                this.GetQValues(beforeState)[action] = (1 - this.learningRate) * this.GetQValues(beforeState)[action] + this.learningRate * reward * rate;
+                rate *= this.discountRate;
+            }
+        }
+
+        // 現在の状態において、次に選択すべき行動を返す
+        // e-グリーディ法
+        public int GetNextAction(string state, Random random, double epsilon)
+        {
+            if (random is null)
+            {
+                random = new Random();
+            }
+            if (random.NextDouble() <= epsilon)
+            {
+                return random.Next(actionNum);
+            }
+
+            List<double> actionValues = this.GetQValues(state); //行動の評価値
+            List<KeyValuePair<double, int>> valuesWithIndex = new List<KeyValuePair<double, int>>();
+
+            // actionの値をインデックスと紐付ける
+            for (int i = 0; i < actionValues.Count; i++)
+            {
+                valuesWithIndex.Add(new KeyValuePair<double, int>(actionValues[i], i));
+            }
+
+            int action = valuesWithIndex
+                .Where(x => x.Key == actionValues.Max()) // 評価が最大のアクションに絞る
+                .OrderBy(x => random.Next()) // 残ったものをシャッフル
+                .Take(1).ToArray()[0].Value; // 先頭の一個のもともとの添字を取得
+            return action;
+        }
+
+        public void Show()
+        {
+            foreach (var value in this.qValues)
+            {
+                Console.Write(value.Key);
+                foreach (var item in value.Value)
+                {
+                    Console.Write("|{0}", item);
+                }
+                Console.WriteLine("");
+            }
         }
     }
 
@@ -343,9 +436,13 @@ namespace AQtion
 
     class Program
     {
-        static bool Episode(QValue qValue, Field field, int screenWidth, Random random)
+        static bool Episode(ImprovedQ improvedQ, Field field, int screenWidth, Random random)
         {
             Simulator simulator = new Simulator(field, 20);
+            List<KeyValuePair<string, int>> stateActionList = new List<KeyValuePair<string, int>>();
+            stateActionList.Add(new KeyValuePair<string, int>(simulator.GetState(), 0));
+
+            double reward = 0;
             while (!simulator.End)
             {
                 //simulator.Draw();
@@ -353,32 +450,45 @@ namespace AQtion
                 //System.Threading.Thread.Sleep(10);
 
                 string state = simulator.GetState();
-                int act = qValue.GetNextAction(state, random);
+                int act = improvedQ.GetNextAction(state, random, 0.2);
                 simulator.Update((Action)act);
 
-                double reward = simulator.GetReward();
+                reward = simulator.GetReward();
                 string nextState = simulator.GetState();
-                qValue.Update(state, act, nextState, reward);
+                stateActionList.Add(new KeyValuePair<string, int>(nextState, act));
 
             }
+            improvedQ.Update(stateActionList, reward);
+
             return simulator.IsGoal;
         }
         static void Main(string[] args)
         {
-            QValue qValue = new QValue(3, 0.1, 0.3);
+            ImprovedQ improved = new ImprovedQ(3, 0.1, 0.3);
             Random random = new Random(100);
 
-            for (int i = 1; i<= 9; i++)
+            List<Field> fields = new List<Field>();
+            for (int i = 1; i <= 7; i++)
             {
-                if (i == 4) { continue; }
-                Field field = new Field($"field{i}.txt");
-                int goals = 0;
-                for (int c = 0; c < 10000; c++)
-                {
-                    if (Episode(qValue, field, 20, random)) { goals++; }
-                }
-                Console.WriteLine(goals);
+                fields.Add(new Field($"field{i}.txt"));
             }
+
+            for (int i = 0; i < 6000; i++)
+            {
+                Episode(improved, fields[i % 6], 20, random);
+            }
+            improved.Show();
+
+            int goals = 0;
+            for (int i = 0; i < 100; i++)
+            {
+                if (Episode(improved, fields[6], 20, random))
+                {
+                    goals++;
+                }
+            }
+            Console.WriteLine("\n{0}", goals);
+            
 
             //Simulator simulator = new Simulator(field, 20);
             //while (!simulator.End)
